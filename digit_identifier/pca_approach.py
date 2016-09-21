@@ -1,27 +1,28 @@
 import pandas
 import numpy as np
-from scipy import linalg as la
+from scipy import linalg as la #used for eigenvalue decomposition
+from sklearn import neighbors #learning algorithm
+
+# how many dimensions should PCA return?
+PCA_DIMS = 40
+# if PCA should be done including also test data (and verification data)
+INCLUDE_TEST_DATA_IN_PCA = False
+# if there should be a verification subset from the training data
+DO_VERIFICATION = False
+# proportion of labeled examples that should be allocated to training data (value >0 and <=1)
+TRAIN_SET_RATIO = 0.7
+
 
 def PCA(data, target_dims=2):
 	datam = data.mean(axis=0)
 	data -= datam
-	
 	R = np.cov(data, rowvar = False)
-	
 	evals, evecs = la.eigh(R)
-	
 	idx = np.argsort(evals)[::-1]
-	
 	evecs = evecs[:,idx]
-	
 	evals = evals[idx]
-	
 	evecs = evecs[:,:target_dims]
-	
 	return np.dot(evecs.T, data.T).T, evals, evecs, datam
-
-def read_input(filename='train.csv'):
-	return pandas.read_csv(filename)
 
 def show_image(data, size = 28):
 	from PIL import Image
@@ -33,74 +34,70 @@ def show_image(data, size = 28):
 	img.show()
 
 '''
-train phase
+input treatment
 '''
-df = read_input()
+df = pandas.read_csv('train.csv')
 train_data = df.as_matrix()[:,1:]
 labels = df['label']
 #print train_data.shape
 #show_image(train_data[3,:])
 #print labels[3]
 N, p = train_data.shape
-#train_sub_set = np.random.binomial(1,0.6,N)
 
-df = read_input('test.csv')
+# Alternative: split training data into training and verification sets
+if DO_VERIFICATION:
+	train_sub_set = np.random.binomial(1,TRAIN_SET_RATIO,N)
+else:
+	train_sub_set = np.ones(N, dtype=np.int)
+
+# Get test data
+df = pandas.read_csv('test.csv')
 test_data = df.as_matrix()
-data = np.concatenate((train_data,test_data))
+N_test, p_test = test_data.shape
+if INCLUDE_TEST_DATA_IN_PCA:
+	data = np.concatenate((train_data,test_data)) # merge them for PCA
+	train_sub_set_after_PCA = np.concatenate((train_sub_set,np.zeros(N_test, dtype=np.int)))
+else:
+	data = train_data[train_sub_set == 1, :]
 
-tdims=40
-
-#U, vals, V, datam = PCA(train_data[train_sub_set == 1,:], tdims)
-U, vals, V, datam = PCA(data, tdims)
 '''
-averages = np.empty([10,10])
-for i in range(10):
-	averages[i,:] = U[labels == i, :].mean(axis=0)
+train phase
 '''
+# PCA
+U, vals, V, datam = PCA(data, PCA_DIMS)
 
-
-#from sklearn import svm
-#clf = svm.SVC()
-from sklearn import neighbors
+# kNN
 clf = neighbors.KNeighborsClassifier()
-
-#clf.fit(U, labels[train_sub_set == 1])
-#clf.fit(U[train_sub_set == 1,:], labels[train_sub_set == 1])
-clf.fit(U[:N,:], labels)
-#clf.fit(train_data[train_sub_set == 1,:], labels[train_sub_set == 1])
-
-#test_set = np.dot(V.T,(train_data[train_sub_set == 0, :] - datam).T).T
-#prediction = clf.predict(test_set)
-prediction = clf.predict(U[N:, :])
-#prediction = clf.predict(train_data[train_sub_set == 0, :])
-#print np.average(prediction == labels[train_sub_set == 0])
-print 'ImageId,Label'
-for i in xrange(len(test_data)):
-	print str(i+1) + ',' + str(prediction[i])
-
-
-
-
-#print vals[:10]
-'''
-import matplotlib.pyplot as plt
-plt.scatter(U[:,0], U[:,1])
-plt.show()
-'''
-
+if INCLUDE_TEST_DATA_IN_PCA:
+	clf.fit(U[train_sub_set_after_PCA == 1,:], labels[train_sub_set == 1])
+else:
+	clf.fit(U, labels[train_sub_set == 1])
 
 '''
-from numpy.random import randn
-data = np.array([randn(8) for k in range(150)])
-data[:50, 2:4] += 5
-data[50:, 2:5] += 5
-
-from matplotlib.pyplot import subplots, show
-trans = PCA(data, 3)[0]
-fig, (ax1, ax2) = subplots(1, 2)
-ax1.scatter(data[:50, 0], data[:50, 1], c = 'r')
-ax1.scatter(data[50:, 0], data[50:, 1], c = 'b')
-ax2.scatter(trans[:50, 0], trans[:50, 1], c = 'r')
-ax2.scatter(trans[50:, 0], trans[50:, 1], c = 'b')
-show()
+verification phase
 '''
+if DO_VERIFICATION:
+	if INCLUDE_TEST_DATA_IN_PCA:
+		# U already contains the examples for verification
+		verification_prediction = clf.predict(U[:N,:][train_sub_set==0,:])
+	else:
+		# U does not contain the examples for verification, so we need to apply the same transformation to it
+		verification_prediction = clf.predict(np.dot(V.T,(train_data[train_sub_set == 0, :] - datam).T).T)
+	print('Validation accuracy: ' + str(np.average(verification_prediction == labels[train_sub_set == 0])))
+
+'''
+apply to test data
+'''
+if INCLUDE_TEST_DATA_IN_PCA:
+	prediction = clf.predict(U[N:, :])
+else:
+	prediction = clf.predict(np.dot(V.T,(test_data - datam).T).T)
+
+'''
+output predictions
+'''
+with open('output.csv', 'w') as outfile:
+	outfile.write('ImageId,Label\n')
+	for i in xrange(len(test_data)):
+		outfile.write(str(i+1) + ',' + str(prediction[i]) + '\n')
+
