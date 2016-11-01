@@ -1,6 +1,6 @@
-This subproject aims to learn https://www.kaggle.com/c/facial-keypoints-detection
+This subproject aims to learn [Facial Keypoints Detection](https://www.kaggle.com/c/facial-keypoints-detection) obtaining a score of 2.08937 and being currently still in the top 10.
 
-Most of the code was taken from this nice tutorial by Daniel Nouri http://danielnouri.org/notes/2014/12/17/using-convolutional-neural-nets-to-detect-facial-keypoints-tutorial/
+Most of the code was taken from this [nice tutorial by Daniel Nouri](http://danielnouri.org/notes/2014/12/17/using-convolutional-neural-nets-to-detect-facial-keypoints-tutorial/)
 
 Main changes were:
 - Using 3/4 of the filters for the convolutional layers,
