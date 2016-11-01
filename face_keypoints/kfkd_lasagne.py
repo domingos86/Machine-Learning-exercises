@@ -1,4 +1,19 @@
-# file kfkd.py
+# file kfkd_lasagne.py
+
+'''
+    Based mostly on the code found in https://github.com/dnouri/kfkd-tutorial
+    
+    To run, open python interpreter, import kfkd_lasagne and run
+    kfkd_lasagne.fit() for a network that learns all the labels or
+    kfkd_lasagne.fit_specialists() to obtain and train a dictionary of
+    specialist networks. Furthermore, the output of fit() can be
+    supplied to fit_specialists() so that the specialist networks start
+    with parameters preloaded from the network obtained from fit().
+    
+    If using GPU, should open pyhton interperter with
+    THEANO_FLAGS=mode=FAST_RUN,device=gpu,floatX=float32 python
+'''
+
 import os
 import sys
 
@@ -62,106 +77,7 @@ def load2d(test=False, cols=None):
     X = X.reshape(-1, 1, 96, 96)
     return X, y
 
-def fit1(plot=False, epochs=400, save_to=None):
-    net = NeuralNet(
-        layers=[  # three layers: one hidden layer
-            ('input', layers.InputLayer),
-            ('hidden', layers.DenseLayer),
-            ('output', layers.DenseLayer),
-            ],
-        # layer parameters:
-        input_shape=(None, 9216),  # 96x96 input pixels per batch
-        hidden_num_units=100,  # number of units in hidden layer
-        output_nonlinearity=None,  # output layer uses identity function
-        output_num_units=30,  # 30 target values
-
-        # optimization method:
-        update=nesterov_momentum,
-        update_learning_rate=0.01,
-        update_momentum=0.9,
-
-        regression=True,  # flag to indicate we're dealing with regression problem
-        max_epochs=epochs,  # we want to train this many epochs
-        verbose=1,
-        )
-
-    X, y = load()
-    net.fit(X, y)
-    if save_to:
-        save_net(net, save_to)
-    print_kaggle_measure(net)
-    if plot:
-        plot_net(net)
-    return net
-
-def fit2(plot=False, epochs=1000, save_to=None):
-    net = NeuralNet(
-        layers=[
-            ('input', layers.InputLayer),
-            ('conv1', layers.Conv2DLayer),
-            ('pool1', layers.MaxPool2DLayer),
-            ('conv2', layers.Conv2DLayer),
-            ('pool2', layers.MaxPool2DLayer),
-            ('conv3', layers.Conv2DLayer),
-            ('pool3', layers.MaxPool2DLayer),
-            ('hidden4', layers.DenseLayer),
-            ('hidden5', layers.DenseLayer),
-            ('output', layers.DenseLayer),
-            ],
-        input_shape=(None, 1, 96, 96),
-        conv1_num_filters=32, conv1_filter_size=(3, 3), pool1_pool_size=(2, 2),
-        conv2_num_filters=64, conv2_filter_size=(2, 2), pool2_pool_size=(2, 2),
-        conv3_num_filters=128, conv3_filter_size=(2, 2), pool3_pool_size=(2, 2),
-        hidden4_num_units=500, hidden5_num_units=500,
-        output_num_units=30, output_nonlinearity=None,
-        
-        update=nesterov_momentum,
-        update_learning_rate=0.01,
-        update_momentum=0.9,
-
-        regression=True,
-        max_epochs=epochs,
-        verbose=1,
-        )
-
-    X, y = load2d()  # load 2-d data
-    net.fit(X, y)
-
-    if save_to:
-        save_net(net, save_to)
-    print_kaggle_measure(net)
-    if plot:
-        plot_net(net)
-    return net
-
 from nolearn.lasagne import BatchIterator
-
-class FlipBatchIterator(BatchIterator):
-    flip_columns = [
-        (0, 2), (1, 3),
-        (4, 8), (5, 9), (6, 10), (7, 11),
-        (12, 16), (13, 17), (14, 18), (15, 19),
-        (22, 24), (23, 25),
-        ]
-
-    def transform(self, Xb, yb):
-        Xb, yb = super(FlipBatchIterator, self).transform(Xb, yb)
-
-        # Flip half of the images in this batch at random:
-        bs = Xb.shape[0]
-        indices = np.random.choice(bs, bs / 2, replace=False)
-        Xb[indices] = Xb[indices, :, :, ::-1]
-
-        if yb is not None:
-            # Horizontal flip of all x coordinates:
-            yb[indices, ::2] = yb[indices, ::2] * -1
-
-            # Swap places, e.g. left_eye_center_x -> right_eye_center_x
-            for a, b in self.flip_columns:
-                yb[indices, a], yb[indices, b] = (
-                    yb[indices, b], yb[indices, a])
-
-        return Xb, yb
 
 class RotationFlipBatchIterator(BatchIterator):
     def __init__(self, batch_size, angle=5, multiples=4, **kwargs):
@@ -259,49 +175,23 @@ class Rotation(object):
     
     def transform(self, X, y):
         return self.transform_X(X), self.transform_y(y)
+
+def fit(plot=False, epochs=3000, save_to=None):
+    '''Trains a neural network for all the labels.
     
-def fit3(plot=False, epochs=3000, save_to=None):
-    net = NeuralNet(
-        layers=[
-            ('input', layers.InputLayer),
-            ('conv1', layers.Conv2DLayer),
-            ('pool1', layers.MaxPool2DLayer),
-            ('conv2', layers.Conv2DLayer),
-            ('pool2', layers.MaxPool2DLayer),
-            ('conv3', layers.Conv2DLayer),
-            ('pool3', layers.MaxPool2DLayer),
-            ('hidden4', layers.DenseLayer),
-            ('hidden5', layers.DenseLayer),
-            ('output', layers.DenseLayer),
-            ],
-        input_shape=(None, 1, 96, 96),
-        conv1_num_filters=32, conv1_filter_size=(3, 3), pool1_pool_size=(2, 2),
-        conv2_num_filters=64, conv2_filter_size=(2, 2), pool2_pool_size=(2, 2),
-        conv3_num_filters=128, conv3_filter_size=(2, 2), pool3_pool_size=(2, 2),
-        hidden4_num_units=500, hidden5_num_units=500,
-        output_num_units=30, output_nonlinearity=None,
-        
-        update=nesterov_momentum,
-        update_learning_rate=0.01,
-        update_momentum=0.9,
-
-        regression=True,
-        batch_iterator_train=FlipBatchIterator(batch_size=128),
-        max_epochs=epochs,
-        verbose=1,
-        )
-
-    X, y = load2d()  # load 2-d data
-    net.fit(X, y)
-
-    if save_to:
-        save_net(net, save_to)
-    print_kaggle_measure(net)
-    if plot:
-        plot_net(net)
-    return net
-
-def fit4(plot=False, epochs=3000, save_to=None):
+    It only uses inputs without missing labels.
+    
+    Returns: trained neural network (nolearn.lasagne.NeuralNet)
+    
+    Keyword arguments:
+    plot -- (bool, False) if true, a plot of the training and validation
+        errors at the end of each epoch will be shown once the network
+        finishes training.
+    epochs -- (int, 3000) the maximum number of epochs for which the
+        network should train.
+    save_to -- (str, None) name of the file to which the network will be
+        pickled.
+    '''
     net = neural_net(epochs)
 
     X, y = load2d()  # load 2-d data
@@ -373,6 +263,24 @@ from collections import OrderedDict
 def fit_specialists(plot=False, fname_pretrain=None, net_pretrain=None,
         save_to=None, settings=SPECIALIST_SETTINGS,
         specialists=OrderedDict()):
+    '''Trains a set of neural networks, each one specialized in a few labels.
+    
+    Keyword arguments:
+    plot -- (bool, False) if true, a plot of the training and validation
+        errors at the end of each epoch will be shown once the network
+        finishes training.
+    fname_pretrain -- (str, None) name of file containing a network whose
+        parameters will be loaded to each specialist network at inception.
+    net_pretrain -- (nolearn.lasagne.NeuralNet, None) network whose
+        parameters will be loaded to each specialist network at inception.
+        If provided, fname_pretrain is ignored.
+    save_to -- (str, None) name of the file to which the specialist
+        networks will be pickled.
+    settings -- (list(dict), SPECIALIST_SETTINGS) list of settings that
+        define each specialist network.
+    specialists -- (OrderedDict, None) container for the specialist
+        networks (alternative to a return value).
+    '''
     from sklearn.base import clone
 
     if fname_pretrain and not net_pretrain:
