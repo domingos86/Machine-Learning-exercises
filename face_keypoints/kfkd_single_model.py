@@ -23,7 +23,8 @@ import sys
 import numpy as np
 from pandas.io.parsers import read_csv
 from lasagne import layers
-from lasagne.updates import nesterov_momentum
+from lasagne.updates import (
+        nesterov_momentum, adadelta, adagrad, apply_nesterov_momentum)
 from nolearn.lasagne import NeuralNet, BatchIterator
 import theano
 import cPickle as pickle
@@ -87,6 +88,39 @@ def load2d(test=False, cols=None, dropna=True):
     X, y = load(test=test, cols=cols, dropna=dropna)
     X = X.reshape(-1, 1, 96, 96)
     return X, y
+
+def load_separate():
+    df = read_csv(os.path.expanduser(FTRAIN))  # load pandas dataframe
+
+    # The Image column has pixel values separated by space; convert
+    # the values to numpy arrays:
+    df['Image'] = df['Image'].apply(lambda im: np.fromstring(im, sep=' '))
+
+    print(df.count())  # prints the number of values for each column
+    
+    mask = df[df.columns[:-1]].count(axis=1) > 8
+    
+    dfs = []
+    dfs.append(df.loc[mask,:])
+    dfs.append(df.loc[mask.apply(lambda x: not x),:])
+    # removes columns that are all nan
+    cmask = dfs[1][dfs[1].columns[:-1]].apply(lambda col: not np.isnan(col).all(), reduce=True, raw=True).values
+    dfs[1] = dfs[1].loc[:,np.append(cmask, [True])]
+    #cmask = cmask[:-1].values # get rid of Image column
+    
+    X = []
+    y = []
+    for df_ in dfs:
+        X_ = np.vstack(df_['Image'].values) / 255. # scale pixel values to [0, 1]
+        X_ = X_.astype(np.float32).reshape(-1, 1, 96, 96)
+        y_ = df_[df_.columns[:-1]].values
+        y_ = (y_ - 48) / 48  # scale target coordinates to [-1, 1]
+        X_, y_ = shuffle(X_, y_, random_state=42)  # shuffle train data
+        y_ = y_.astype(np.float32)
+        X.append(X_)
+        y.append(y_)
+
+    return zip(X, y), cmask
    
 def shuffle(*arrays, **options):
     random_state = options.pop('random_state', None)
@@ -97,16 +131,19 @@ def shuffle(*arrays, **options):
     random_state.shuffle(indices)
     return [a[indices] for a in arrays]
 
-class RotationFlipBatchIterator(BatchIterator):
-    def __init__(self, batch_size, angle=5, multiples=4, **kwargs):
-        super(RotationFlipBatchIterator, self).__init__(batch_size, **kwargs)
-        self.rotations = [Rotation(angle*i) for i in range(-multiples, multiples+1)]
-        self.flip_columns = [
+FLIP_COLUMNS = [
             (0, 2), (1, 3),
             (4, 8), (5, 9), (6, 10), (7, 11),
             (12, 16), (13, 17), (14, 18), (15, 19),
             (22, 24), (23, 25),
             ]
+
+class RotationFlipBatchIterator(BatchIterator):
+    def __init__(self, batch_size, flip_columns=FLIP_COLUMNS, angle=5,
+                    multiples=4, **kwargs):
+        super(RotationFlipBatchIterator, self).__init__(batch_size, **kwargs)
+        self.rotations = [Rotation(angle*i) for i in range(-multiples, multiples+1)]
+        self.flip_columns = flip_columns
 
     def transform(self, Xb, yb):
         Xb, yb = super(RotationFlipBatchIterator, self).transform(Xb, yb)
@@ -187,17 +224,34 @@ class Rotation(object):
         return self.transform_X(X), self.transform_y(y)
 
 class WeightedSquareLoss(object):
-    def __init__(self, weights):
+    def __init__(self, weights, aggregate=False):
         weights = np.asarray(weights, dtype=theano.config.floatX)
-        weights = weights.reshape((1,) + weights.shape)
+        self.shape = weights.shape
+        weights = weights.reshape((1,) + self.shape)
         self.weights = theano.tensor.addbroadcast(theano.shared(weights), 0)
-        self.zeros = theano.tensor.addbroadcast(theano.shared(
-            np.zeros(weights.shape, dtype=theano.config.floatX)), 0)
+        self.zero = theano.shared(float32(0.0))
+        self.aggregate = aggregate
     
     def __call__(self, a, b):
-        return theano.tensor.switch(theano.tensor.isnan(b),
-            self.zeros,
+        result = theano.tensor.switch(theano.tensor.isnan(b),
+            self.zero,
             ((a - b) ** 2) * self.weights)
+        if self.aggregate:
+            return theano.tensor.mean(result,
+                axis = range(1,1+len(self.shape)))
+        return result
+
+class RMSEScorer(object):
+    def __init__(self, name, weights):
+        self.name = name
+        self.valid_scorer = (name,
+            WeightedSquareLoss(np.ones(weights.shape,
+                dtype=theano.config.floatX), True))
+        self.factor = weights.size / (1/weights).sum()
+    
+    def on_epoch_finished(self, nn, train_history):
+        train_history[-1][self.name] = \
+            RMSE(self.factor*train_history[-1][self.name])
 
 class LogAdjustVariable(object):
     def __init__(self, name, start=0.03, stop=0.001):
@@ -234,7 +288,8 @@ class EarlyStopping(object):
             nn.load_params_from(self.best_weights)
             raise StopIteration()
 
-def neural_net(epochs=2000, output_units=30, initial_rate=0.03, weights=None):
+def neural_net(epochs=2000, output_units=30, initial_rate=0.03,
+        weights=None):
     if weights is None:
         weights = np.ones(output_units, theano.config.floatX)
     return NeuralNet(
@@ -282,7 +337,7 @@ def neural_net(epochs=2000, output_units=30, initial_rate=0.03, weights=None):
         verbose=1,
         )
 
-def fit(plot=False, epochs=1000, save_to=None):
+def fit(plot=False, epochs=2000, save_to=None):
     '''Trains a neural network for all the labels.
     
     It only uses inputs without missing labels.
@@ -305,13 +360,116 @@ def fit(plot=False, epochs=1000, save_to=None):
     #y = theano.shared(y.astype(theano.config.floatX), borrow=True)
     
     net = neural_net(epochs,
-        weights = y.shape[0]/np.isfinite(y).sum(axis=0))
+        weights = get_weights(y))
     
     net.fit(X, y)
 
     if save_to:
         save_net(net, save_to)
     print_kaggle_measure(net)
+    if plot:
+        plot_net(net)
+    return net
+
+def adadelta_momentum(grads, params, learning_rate=1.0, momentum=0.9,
+                rho=0.95, epsilon=1e-06):
+    return apply_nesterov_momentum(
+            adadelta(grads, params, learning_rate, rho, epsilon),
+            params=params, momentum=momentum)
+
+def adagrad_momentum(grads, params, learning_rate=1.0, momentum=0.9,
+                epsilon=1e-06):
+    return apply_nesterov_momentum(
+            adagrad(grads, params, learning_rate, epsilon),
+            params=params, momentum=momentum)
+
+def neural_net2(epochs=2000, output_units=30, learning_rate=0.8,
+        weights=None, flips = FLIP_COLUMNS, patience=50):
+    if weights is None:
+        weights = np.ones(output_units, theano.config.floatX)
+    score = RMSEScorer('RMSE', weights)
+    net = NeuralNet(
+        layers=[
+            ('input', layers.InputLayer),
+            ('conv1', layers.Conv2DLayer),
+            ('pool1', layers.MaxPool2DLayer),
+            ('dropout1', layers.DropoutLayer),
+            ('conv2', layers.Conv2DLayer),
+            ('pool2', layers.MaxPool2DLayer),
+            ('dropout2', layers.DropoutLayer),
+            ('conv3', layers.Conv2DLayer),
+            ('pool3', layers.MaxPool2DLayer),
+            ('dropout3', layers.DropoutLayer),
+            ('hidden4', layers.DenseLayer),
+            ('dropout4', layers.DropoutLayer),
+            ('hidden5', layers.DenseLayer),
+            ('output', layers.DenseLayer),
+            ],
+        input_shape=(None, 1, 96, 96),
+        conv1_num_filters=48, conv1_filter_size=(5, 5), pool1_pool_size=(2, 2),
+        dropout1_p=0.1,
+        conv2_num_filters=96, conv2_filter_size=(3, 3), pool2_pool_size=(2, 2),
+        dropout2_p=0.2,
+        conv3_num_filters=192, conv3_filter_size=(3, 3), pool3_pool_size=(2, 2),
+        dropout3_p=0.3,
+        hidden4_num_units=1500,
+        dropout4_p=0.5,
+        hidden5_num_units=1000,
+        output_num_units=output_units, output_nonlinearity=None,
+        
+        update=adadelta,
+        update_learning_rate=theano.shared(float32(learning_rate)),
+        #update_momentum=theano.shared(float32(0.9)),
+
+        regression=True,
+        objective_loss_function=WeightedSquareLoss(weights),
+        batch_iterator_train=RotationFlipBatchIterator(batch_size=128,
+                                        flip_columns=flips),
+        on_epoch_finished=[
+            LogAdjustVariable('update_learning_rate', start=learning_rate, stop=0.001),
+            #LogAdjustVariable('update_momentum', start=0.9, stop=0.999),
+            score.on_epoch_finished,
+        ],
+        scores_valid=[
+            score.valid_scorer
+        ],
+        max_epochs=epochs,
+        verbose=1,
+        )
+    # ensures Early Stopping occurs after the the epoch log is printed
+    net.on_epoch_finished.append(EarlyStopping(patience=patience))
+    return net
+
+def fit2(plot=False, epochs=2000, save_to=None):
+    '''Trains a neural network for all the labels.
+    
+    It only uses inputs without missing labels.
+    
+    Returns: trained neural network (nolearn.lasagne.NeuralNet)
+    
+    Keyword arguments:
+    plot -- (bool, False) if true, a plot of the training and validation
+        errors at the end of each epoch will be shown once the network
+        finishes training.
+    epochs -- (int, 3000) the maximum number of epochs for which the
+        network should train.
+    save_to -- (str, None) name of the file to which the network will be
+        pickled.
+    '''
+    
+    X, y = load2d(dropna=False)
+      # load 2-d data
+    #X = theano.shared(X.astype(theano.config.floatX), borrow=True)
+    #y = theano.shared(y.astype(theano.config.floatX), borrow=True)
+    
+    net = neural_net2(epochs,
+        weights = get_weights(y))
+    
+    net.fit(X, y)
+
+    if save_to:
+        save_net(net, save_to)
+    #print_kaggle_measure(net)
     if plot:
         plot_net(net)
     return net
@@ -335,6 +493,51 @@ def predict(net, save_to='submission.csv'):
     submission = DataFrame(values, columns=('RowId', 'Location'))
     submission.to_csv(save_to, index=False)
     print("Wrote {}".format(save_to))
+
+def fit_separate(save_to=None, nets=None):
+    '''Trains a neural network for all the labels.
+    
+    It only uses inputs without missing labels.
+    
+    Returns: tuple(list of trained neural networks (nolearn.lasagne.NeuralNet),
+        column mask for second network)
+    
+    Keyword arguments:
+    plot -- (bool, False) if true, a plot of the training and validation
+        errors at the end of each epoch will be shown once the network
+        finishes training.
+    save_to -- (str, None) name of the file to which the network will be
+        pickled.
+    nets -- (list(NeuralNet), None) list into which the neural networks
+        will be stored
+    '''
+    
+    if nets is None:
+        nets = []
+    
+    train, cmask = load_separate()
+    X, y = train[0]
+      # load 2-d data
+    
+    net = neural_net2(5000,
+        weights = get_weights(y), learning_rate=0.5, patience=100)
+    nets.append(net)
+    net.fit(X, y)
+    
+    X, y = train[1]
+    net2 = neural_net2(2000, output_units=8, weights = get_weights(y),
+        learning_rate=0.5, flips=FLIP_COLUMNS[:2], patience=50)
+    nets.append(net2)
+    params = net.get_all_params_values()
+    for i, param in enumerate(params['output']):
+        params['output'][i] = param[...,cmask]
+    net2.load_params_from(params)
+    
+    net2.fit(X, y)
+    
+    if save_to:
+        save_net(nets, save_to)
+    return nets
 
 def plot_net(net):
     try:
@@ -387,6 +590,9 @@ def load_net(file_name):
 
 def float32(k):
     return np.cast['float32'](k)
+   
+def get_weights(y):
+    y.shape[0]/np.isfinite(y).sum(axis=0)
 
 def RMSE(loss):
     return 48*np.sqrt(loss)
